@@ -1,10 +1,15 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/rpc"
+	"os"
 	"sync"
+	"time"
+
+	"golang.org/x/exp/rand"
 )
 
 type RPCProxy struct {
@@ -76,6 +81,7 @@ func (s *Server) Serve() {
 }
 
 func (s *Server) Shutdown() {
+	s.cm.Stop()
 	close(s.quit)
 	s.listener.Close()
 	s.wg.Wait()
@@ -110,4 +116,30 @@ func (s *Server) DisconnectPeer(peerId int) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) Call(id int, serviceMethod string, args interface{}, reply interface{}) error {
+	s.mu.Lock()
+	peer := s.peerClients[id]
+	s.mu.Unlock()
+
+	if peer == nil {
+		return fmt.Errorf("call client %d after it's closed", id)
+	}
+
+	return peer.Call(serviceMethod, args, reply)
+}
+
+func (rpp *RPCProxy) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
+	if len(os.Getenv("RAFT_UNRELIABLE_RPC")) > 0 {
+		dice := rand.Intn(10)
+		if dice == 9 {
+			return fmt.Errorf("RPC failed")
+		} else if dice == 8 {
+			time.Sleep(75 * time.Millisecond)
+		}
+	} else {
+		time.Sleep(time.Duration(1+rand.Intn(5)) * time.Millisecond)
+	}
+	return rpp.cm.RequestVote(args, reply)
 }
