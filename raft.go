@@ -22,6 +22,25 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+type LogEntry struct {
+	Command any
+	Term    int
+}
+
 const (
 	Follower CMState = iota
 	Candidate
@@ -180,7 +199,52 @@ func (cm *ConsensusModule) becomeFollower(term int) {
 func (cm *ConsensusModule) startLeader() {
 	log.Printf("Server %d becoming leader for term %d\n", cm.id, cm.currentTerm)
 	cm.state = Leader
-	// Send periodic heartbeats, as long as still leader.
+
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
+		// Send periodic heartbeats, as long as still leader.
+		for {
+			cm.leaderSendHeartbeats()
+			<-ticker.C
+
+			cm.mu.Lock()
+			if cm.state != Leader {
+				cm.mu.Unlock()
+				return
+			}
+			cm.mu.Unlock()
+		}
+	}()
+}
+
+func (cm *ConsensusModule) leaderSendHeartbeats() {
+	cm.mu.Lock()
+	if cm.state != Leader {
+		cm.mu.Unlock()
+		return
+	}
+	savedCurrentTerm := cm.currentTerm
+	cm.mu.Unlock()
+
+	for _, peerId := range cm.peerIds {
+		args := AppendEntriesArgs{
+			Term:     savedCurrentTerm,
+			LeaderId: cm.id,
+		}
+		go func(peerId int) {
+			var reply AppendEntriesReply
+			if err := cm.server.Call(peerId, "ConsensusModule.AppendEntries", args, &reply); err == nil {
+				cm.mu.Lock()
+				defer cm.mu.Unlock()
+				if reply.Term > savedCurrentTerm {
+					cm.becomeFollower(reply.Term)
+					return
+				}
+			}
+		}(peerId)
+	}
 }
 
 func (cm *ConsensusModule) Stop() {
@@ -210,6 +274,31 @@ func (cm *ConsensusModule) RequestVote(args RequestVoteArgs, reply *RequestVoteR
 		reply.VoteGranted = false
 		log.Printf("Server %d did not grant vote to server %d for term %d\n", cm.id, args.CandidateId, args.Term)
 	}
+	reply.Term = cm.currentTerm
+	return nil
+}
+
+func (cm *ConsensusModule) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.state == Dead {
+		return nil
+	}
+
+	if args.Term > cm.currentTerm {
+		cm.becomeFollower(args.Term)
+	}
+
+	reply.Success = false
+	if args.Term == cm.currentTerm {
+		if cm.state != Follower {
+			cm.becomeFollower(args.Term)
+		}
+		cm.electionResetEvent = time.Now()
+		reply.Success = true
+		log.Printf("Server %d received heartbeat from leader %d for term %d\n", cm.id, args.LeaderId, args.Term)
+	}
+
 	reply.Term = cm.currentTerm
 	return nil
 }

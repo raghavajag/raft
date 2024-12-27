@@ -143,3 +143,8 @@ func (rpp *RPCProxy) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) 
 	}
 	return rpp.cm.RequestVote(args, reply)
 }
+
+func (rpp *RPCProxy) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
+	time.Sleep(time.Duration(1+rand.Intn(5)) * time.Millisecond)
+	return rpp.cm.AppendEntries(args, reply)
+}
