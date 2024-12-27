@@ -1,55 +1,98 @@
 package main
 
 import (
-	"flag"
-	"fmt"
+	"log"
 	"os"
 	"os/signal"
+	"syscall"
+	"time"
 )
 
 func main() {
-	// Command line parsing
-	var servers int
-	flag.IntVar(&servers, "servers", 3, "number of servers in the cluster")
-	flag.Parse()
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	// Create a slice to hold all servers
-	serverList := make([]*Server, servers)
+	// Create a Raft cluster with 3 servers
+	numServers := 3
+	servers := make([]*Server, numServers)
 
-	// Create peer IDs for each server
-	for i := 0; i < servers; i++ {
+	for i := 0; i < numServers; i++ {
 		peerIds := make([]int, 0)
-		for j := 0; j < servers; j++ {
+		for j := 0; j < numServers; j++ {
 			if j != i {
 				peerIds = append(peerIds, j)
 			}
 		}
-
-		// Create and start each server
-		server := NewServer(i, peerIds)
-		serverList[i] = server
-		server.Serve()
-
-		fmt.Printf("Started server %d\n", i)
+		servers[i] = NewServer(i, peerIds)
+		servers[i].Serve()
 	}
 
-	// Print all server addresses
-	fmt.Println("\nServer addresses:")
-	for i, server := range serverList {
-		fmt.Printf("Server %d: %s\n", i, server.GetListenAddr())
+	// Connect all servers to each other
+	for i := 0; i < numServers; i++ {
+		for j := 0; j < numServers; j++ {
+			if i != j {
+				if err := servers[i].ConnectToPeer(j, servers[j].GetListenAddr()); err != nil {
+					log.Fatalf("Error connecting server %d to server %d: %v", i, j, err)
+				}
+			}
+		}
 	}
 
-	// Handle Ctrl+C gracefully
-	terminate := make(chan os.Signal, 1)
-	signal.Notify(terminate, os.Interrupt)
+	// Wait for a leader to be elected
+	time.Sleep(5 * time.Second)
 
-	// Wait for interrupt signal
-	<-terminate
-	fmt.Println("\nReceived interrupt signal. Shutting down...")
-
-	// Shutdown all servers
-	for i, server := range serverList {
-		server.Shutdown()
-		fmt.Printf("Server %d shutdown complete\n", i)
+	// Check and log the current leader
+	leaderId := -1
+	leaderTerm := -1
+	for i := 0; i < numServers; i++ {
+		if servers[i].cm.state == Leader {
+			leaderId = i
+			leaderTerm = servers[i].cm.currentTerm
+			break
+		}
 	}
+
+	if leaderId == -1 {
+		log.Fatalf("No leader elected")
+	} else {
+		log.Printf("Leader elected: Server %d in term %d", leaderId, leaderTerm)
+	}
+
+	// Simulate leader failure
+	log.Printf("Simulating leader failure: Shutting down server %d", leaderId)
+	servers[leaderId].Shutdown()
+
+	// Wait for a new leader to be elected
+	time.Sleep(5 * time.Second)
+
+	// Check and log the new leader
+	newLeaderId := -1
+	newLeaderTerm := -1
+	for i := 0; i < numServers; i++ {
+		if i != leaderId && servers[i].cm.state == Leader {
+			newLeaderId = i
+			newLeaderTerm = servers[i].cm.currentTerm
+			break
+		}
+	}
+
+	if newLeaderId == -1 {
+		log.Fatalf("No new leader elected after failure")
+	} else {
+		log.Printf("New leader elected: Server %d in term %d", newLeaderId, newLeaderTerm)
+	}
+
+	// Set up signal handling to gracefully shut down the servers
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	<-sigs
+	log.Println("Shutting down servers...")
+
+	for _, server := range servers {
+		if server != nil {
+			server.Shutdown()
+		}
+	}
+
+	log.Println("Servers shut down.")
 }
