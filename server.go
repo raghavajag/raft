@@ -30,21 +30,24 @@ type Server struct {
 
 	cm       *ConsensusModule
 	rpcProxy *RPCProxy
+
+	ready <-chan any
 }
 
-func NewServer(serverId int, peerIds []int) *Server {
+func NewServer(serverId int, peerIds []int, ready <-chan any) *Server {
 	s := new(Server)
 	s.serverId = serverId
 	s.peerIds = peerIds
 	s.peerClients = make(map[int]*rpc.Client)
 	s.quit = make(chan any)
+	s.ready = ready
 	return s
 }
 
 func (s *Server) Serve() {
 	s.mu.Lock()
 
-	s.cm = NewConsensusModule(s.serverId, s.peerIds, s)
+	s.cm = NewConsensusModule(s.serverId, s.peerIds, s, s.ready)
 	s.rpcServer = rpc.NewServer()
 	s.rpcProxy = &RPCProxy{cm: s.cm}
 	s.rpcServer.RegisterName("ConsensusModule", s.rpcProxy)
@@ -101,7 +104,6 @@ func (s *Server) ConnectToPeer(peerId int, addr net.Addr) error {
 		if err != nil {
 			return err
 		}
-		log.Printf("[%v] connected to peer %v at %s", s.serverId, peerId, addr)
 		s.peerClients[peerId] = client
 	}
 	return nil
@@ -147,4 +149,15 @@ func (rpp *RPCProxy) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) 
 func (rpp *RPCProxy) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
 	time.Sleep(time.Duration(1+rand.Intn(5)) * time.Millisecond)
 	return rpp.cm.AppendEntries(args, reply)
+}
+
+func (s *Server) DisconnectAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.peerClients {
+		if s.peerClients[id] != nil {
+			s.peerClients[id].Close()
+			s.peerClients[id] = nil
+		}
+	}
 }
